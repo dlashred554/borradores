@@ -95,17 +95,95 @@ app.get("/auth/callback", async (req, res) => {
     res.send(`
       <!doctype html>
       <html lang="es">
-      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DraftFlow</title><link rel="stylesheet" href="/style.css"></head>
-      <body><main><section class="card">
-      <div class="logo">DF</div>
-      <h1>Cuenta conectada</h1>
-      <p>Tu cuenta de TikTok ha sido autorizada. Ya puedes enviar un vídeo como borrador.</p>
-      <form action="/upload?session=${encodeURIComponent(sessionId)}" method="post" enctype="multipart/form-data">
-        <input type="file" name="video" accept="video/mp4,video/quicktime,video/webm" required>
-        <button type="submit">Enviar a TikTok</button>
-      </form>
-      <footer><a href="/">Inicio</a><a href="/privacy.html">Privacidad</a></footer>
-      </section></main></body></html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>DraftFlow</title>
+        <link rel="stylesheet" href="/style.css">
+      </head>
+      <body>
+        <main><section class="card">
+          <div class="logo">DF</div>
+          <h1>Cuenta conectada</h1>
+          <p>Selecciona hasta 20 vídeos. DraftFlow los enviará uno por uno.</p>
+          <input id="videos" type="file" accept="video/mp4,video/quicktime,video/webm" multiple>
+          <p id="count">0 vídeos seleccionados</p>
+          <button id="send" type="button">Enviar a TikTok</button>
+          <div id="status"></div>
+          <footer><a href="/">Inicio</a><a href="/privacy.html">Privacidad</a></footer>
+
+          <script>
+            const input = document.getElementById("videos");
+            const send = document.getElementById("send");
+            const count = document.getElementById("count");
+            const status = document.getElementById("status");
+            const session = ${JSON.stringify(sessionId)};
+
+            input.addEventListener("change", () => {
+              if (input.files.length > 20) {
+                status.textContent = "Máximo 20 vídeos por lote.";
+                input.value = "";
+                count.textContent = "0 vídeos seleccionados";
+                return;
+              }
+              count.textContent = input.files.length + " vídeo" + (input.files.length === 1 ? "" : "s") + " seleccionado" + (input.files.length === 1 ? "" : "s");
+              status.textContent = "";
+            });
+
+            send.addEventListener("click", async () => {
+              const files = Array.from(input.files);
+              if (!files.length) {
+                status.textContent = "Selecciona al menos un vídeo.";
+                return;
+              }
+              if (files.length > 20) {
+                status.textContent = "Máximo 20 vídeos por lote.";
+                return;
+              }
+
+              send.disabled = true;
+              input.disabled = true;
+
+              let completed = 0;
+
+              for (const file of files) {
+                status.textContent = "Enviando " + (completed + 1) + "/" + files.length + ": " + file.name;
+
+                const form = new FormData();
+                form.append("video", file);
+
+                try {
+                  const response = await fetch("/upload?session=" + encodeURIComponent(session), {
+                    method: "POST",
+                    body: form
+                  });
+
+                  const data = await response.json();
+
+                  if (!response.ok || !data.ok) {
+                    status.textContent = "Detenido en " + (completed + 1) + "/" + files.length + ". " + (data.message || "TikTok rechazó la subida.");
+                    break;
+                  }
+
+                  completed++;
+                  status.textContent = "Enviados " + completed + "/" + files.length;
+                } catch (error) {
+                  status.textContent = "Error en " + file.name + ". Se han enviado " + completed + "/" + files.length + ".";
+                  break;
+                }
+              }
+
+              if (completed === files.length) {
+                status.textContent = "Listo: " + completed + " de " + files.length + " vídeos enviados a TikTok.";
+              }
+
+              send.disabled = false;
+              input.disabled = false;
+            });
+          </script>
+        </section></main>
+      </body>
+      </html>
     `);
   } catch (error) {
     console.error(error);
@@ -117,11 +195,11 @@ app.post("/upload", upload.single("video"), async (req, res) => {
   const session = sessions.get(req.query.session);
 
   if (!session?.accessToken) {
-    return res.status(401).send("Sesión no válida. Vuelve a conectar TikTok.");
+    return res.status(401).json({ ok: false, message: "Sesión no válida. Vuelve a conectar TikTok." });
   }
 
   if (!req.file) {
-    return res.status(400).send("Selecciona un vídeo.");
+    return res.status(400).json({ ok: false, message: "Selecciona un vídeo." });
   }
 
   try {
@@ -147,7 +225,11 @@ app.post("/upload", upload.single("video"), async (req, res) => {
     const initData = await initResponse.json();
 
     if (!initResponse.ok || initData.error?.code !== "ok") {
-      return res.status(400).send("TikTok no aceptó la subida: " + JSON.stringify(initData));
+      console.error("TikTok upload init error:", initData);
+      return res.status(400).json({
+        ok: false,
+        message: "TikTok rechazó la subida. " + (initData.error?.message || initData.error?.code || "Revisa el límite o la configuración de TikTok.")
+      });
     }
 
     const uploadResponse = await fetch(initData.data.upload_url, {
@@ -161,17 +243,13 @@ app.post("/upload", upload.single("video"), async (req, res) => {
     });
 
     if (!uploadResponse.ok) {
-      return res.status(400).send("No se pudo transferir el vídeo a TikTok.");
+      return res.status(400).json({ ok: false, message: "No se pudo transferir el vídeo a TikTok." });
     }
 
-    res.send(`
-      <!doctype html>
-      <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DraftFlow</title><link rel="stylesheet" href="/style.css"></head>
-      <body><main><section class="card"><div class="logo">DF</div><h1>Vídeo enviado</h1><p>El vídeo se ha enviado a TikTok como borrador. Abre TikTok para continuar editándolo y publicarlo.</p><footer><a href="/">Volver</a></footer></section></main></body></html>
-    `);
+    return res.json({ ok: true });
   } catch (error) {
     console.error(error);
-    res.status(500).send("Error durante la subida.");
+    return res.status(500).json({ ok: false, message: "Error durante la subida." });
   }
 });
 
